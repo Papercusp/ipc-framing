@@ -26,6 +26,15 @@ describe('encodeFrame', () => {
     expect(() => encodeFrame(FrameType.EVENT_BIN, huge)).toThrow(FrameError);
   });
 
+  // S1: the cap is inclusive — a payload of EXACTLY MAX_FRAME_BYTES is accepted
+  // (the guard is `> cap`, not `>= cap`). Only cap+1 (above) is rejected.
+  it('accepts a payload of exactly MAX_FRAME_BYTES (inclusive cap)', () => {
+    const atCap = Buffer.alloc(MAX_FRAME_BYTES);
+    const f = encodeFrame(FrameType.EVENT_BIN, atCap);
+    expect(f.length).toBe(HEADER_BYTES + MAX_FRAME_BYTES);
+    expect(f.readUInt32BE(0)).toBe(MAX_FRAME_BYTES);
+  });
+
   it('handles zero-length payloads', () => {
     const f = encodeFrame(FrameType.CANCEL, Buffer.alloc(0));
     expect(f.length).toBe(HEADER_BYTES);
@@ -53,6 +62,24 @@ describe('encodeEventBinPayload / decodeEventBinPayload', () => {
 
   it('rejects truncated payloads', () => {
     expect(() => decodeEventBinPayload(Buffer.from([1, 2, 3]))).toThrow(FrameError);
+  });
+
+  // S1: nameLen is a BYTE length, not a char count. A name with multibyte UTF-8
+  // code points (accented + emoji) must round-trip exactly, and the encoded
+  // nameLen field must equal the UTF-8 byte length (> the char count), proving the
+  // length is bytes. Truncating at a char count would corrupt the binary split.
+  it('nameLen is byte-length, not char-count (multibyte name round-trips)', () => {
+    const name = 'café🎧'; // 5 code points; 'é'=2 bytes, '🎧'=4 bytes → 9 bytes
+    const byteLen = Buffer.byteLength(name, 'utf8');
+    expect(byteLen).toBe(9);
+    expect(byteLen).toBeGreaterThan([...name].length); // bytes > chars
+    const binary = new Uint8Array([0x01, 0x02, 0x03]);
+    const payload = encodeEventBinPayload(7n, name, binary);
+    // The on-wire nameLen field (bytes 8..12) must be the BYTE length.
+    expect(payload.readUInt32BE(8)).toBe(byteLen);
+    const decoded = decodeEventBinPayload(payload);
+    expect(decoded.name).toBe(name);
+    expect(Array.from(decoded.binary)).toEqual([0x01, 0x02, 0x03]);
   });
 
   it('rejects payload with nameLen exceeding remaining bytes', () => {
