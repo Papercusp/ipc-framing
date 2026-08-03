@@ -9,6 +9,8 @@ import {
   encodeJsonFrame,
   encodeEventBinPayload,
   decodeEventBinPayload,
+  encodeDataPayload,
+  decodeDataPayload,
 } from './index';
 
 describe('encodeFrame', () => {
@@ -181,5 +183,69 @@ describe('FrameDecoder', () => {
     // Mutate the input chunk after decode; output must be unaffected.
     chunk.fill(0);
     expect(out[0].payload.toString()).toBe('{"id":1}');
+  });
+});
+
+/**
+ * DATA (0x07) — no-http-anywhere-2026-07-28 P-012.
+ *
+ * The plan's binding requirement is that this frame is "mirrored byte-for-byte"
+ * in endpoint_ipc_framing.rs. GOLDEN_DATA_FRAME below is the shared fixture:
+ * the Rust suite asserts the SAME bytes in its `golden_data_frame_matches_ts`
+ * test. If you change either encoder, both tests fail together — which is the
+ * point. A round-trip test alone cannot catch a mirrored-but-wrong layout,
+ * because each side would happily agree with itself.
+ */
+const GOLDEN_DATA_FRAME = [
+  0x00, 0x00, 0x00, 0x0a, // length = 10 (8B id + 2B payload)
+  0x07,                   // type = DATA
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // id = 1 (u64 BE)
+  0xaa, 0xbb,             // payload
+];
+
+describe('DATA frame (0x07)', () => {
+  it('matches the golden byte vector the Rust mirror also asserts', () => {
+    const frame = encodeFrame(FrameType.DATA, encodeDataPayload(1n, Uint8Array.from([0xaa, 0xbb])));
+    expect([...frame]).toEqual(GOLDEN_DATA_FRAME);
+  });
+
+  it('round-trips id + payload', () => {
+    const p = encodeDataPayload(0xdeadbeefn, Uint8Array.from([1, 2, 3]));
+    const d = decodeDataPayload(p);
+    expect(d.id).toBe(0xdeadbeefn);
+    expect([...d.payload]).toEqual([1, 2, 3]);
+  });
+
+  it('preserves a full u64 id without precision loss', () => {
+    // Past Number.MAX_SAFE_INTEGER — the reason the codec uses bigint.
+    const big = 0xfffffffffffffffen;
+    expect(decodeDataPayload(encodeDataPayload(big, new Uint8Array())).id).toBe(big);
+  });
+
+  it('accepts a ZERO-byte tail (end-of-stream without tearing the call down)', () => {
+    const p = encodeDataPayload(7n, new Uint8Array());
+    expect(p.length).toBe(8);
+    const d = decodeDataPayload(p);
+    expect(d.id).toBe(7n);
+    expect(d.payload.length).toBe(0);
+  });
+
+  it('rejects a payload too short to carry an id', () => {
+    expect(() => decodeDataPayload(Buffer.alloc(7))).toThrow(FrameError);
+  });
+
+  it('decodes through the streaming decoder like any other frame', () => {
+    const dec = new FrameDecoder();
+    dec.push(encodeFrame(FrameType.DATA, encodeDataPayload(9n, Uint8Array.from([0xff]))));
+    const out = dec.drain();
+    expect(out).toHaveLength(1);
+    expect(out[0]!.type).toBe(FrameType.DATA);
+    expect(decodeDataPayload(out[0]!.payload).id).toBe(9n);
+  });
+
+  it('is a distinct tag that does not collide with an existing frame type', () => {
+    const tags = Object.values(FrameType);
+    expect(new Set(tags).size).toBe(tags.length);
+    expect(FrameType.DATA).toBe(0x07);
   });
 });
